@@ -39,7 +39,7 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import (
 )
 from strands_tools.agent_core_memory import AgentCoreMemoryToolProvider
 
-MODEL_ID = "global.anthropic.claude-opus-4-8"
+MODEL_ID = os.environ.get("BEDROCK_AGENTCORE_MODEL_ID")
 PROMPT_FILE = Path(".prompt")
 
 MEMORY_ID = os.environ.get("BEDROCK_AGENTCORE_MEMORY_ID")
@@ -104,42 +104,36 @@ def make_agent(session_id: str, actor_id: str):
     )
 
 
-def _run_agent(payload, context, task_id):
-    """Run agent in background thread - lets AgentCore return 200 immediately."""
-    try:
-        session_id = getattr(context, "session_id", "default")
-        actor_id = "user"
-        headers = getattr(context, "headers", {}) or {}
-        actor_id = headers.get(
-            "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actor-Id", actor_id
-        )
-
-        q = payload.get("prompt", "")
-        agent = make_agent(session_id=session_id, actor_id=actor_id)
-        result = agent(q)
-        try:
-            app.complete_async_task(task_id)
-        except Exception:
-            pass
-        return {"result": str(result)}
-    except Exception as e:
-        print(f"[agent error] {e}")
-        try:
-            app.complete_async_task(task_id)
-        except Exception:
-            pass
-        raise
-
-
 @app.entrypoint
 def invoke(payload, context):
-    """AgentCore HTTP entrypoint - async pattern (returns 200 fast)."""
-    task_id = app.add_async_task("agent_processing", payload)
-    thread = threading.Thread(
-        target=_run_agent, args=(payload, context, task_id), daemon=True
+    """AgentCore HTTP entrypoint — returns the response, then continues working in background."""
+    session_id = getattr(context, "session_id", "default")
+    actor_id = "user"
+    headers = getattr(context, "headers", {}) or {}
+    actor_id = headers.get(
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Actor-Id", actor_id
     )
-    thread.start()
-    return {"statusCode": 200}
+
+    q = payload.get("prompt", "")
+    agent = make_agent(session_id=session_id, actor_id=actor_id)
+    result = agent(q)
+
+    # Background: continue exploring the topic (ambient/self-improving behavior)
+    def _background_explore():
+        try:
+            follow_up = (
+                f"You just answered: '{q}'. "
+                f"Now proactively explore edge cases, improvements, or related topics. "
+                f"Save any useful findings to your system prompt for future use."
+            )
+            bg_agent = make_agent(session_id=session_id, actor_id=actor_id)
+            bg_agent(follow_up)
+        except Exception as e:
+            print(f"[background explore] {e}")
+
+    threading.Thread(target=_background_explore, daemon=True).start()
+
+    return {"response": str(result)}
 
 
 if __name__ == "__main__":
